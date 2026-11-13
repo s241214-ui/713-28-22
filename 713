@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Triangle Battle Arena</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0b0c10; overflow: hidden;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    font-family: Helvetica, Arial, sans-serif;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+
+// ===================== SETUP =====================
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+let W = 0, H = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (game && game.touchMode) game.setupJoysticks();
+}
+window.addEventListener("resize", resize);
+
+// ===================== HELPERS =====================
+function triPoints(x, y, r, angle) {
+  return [
+    [x + Math.cos(angle) * r,       y + Math.sin(angle) * r],
+    [x + Math.cos(angle + 2.4) * r, y + Math.sin(angle + 2.4) * r],
+    [x + Math.cos(angle - 2.4) * r, y + Math.sin(angle - 2.4) * r],
+  ];
+}
+function drawTri(x, y, r, angle, fill) {
+  const p = triPoints(x, y, r, angle);
+  ctx.beginPath();
+  ctx.moveTo(p[0][0], p[0][1]);
+  ctx.lineTo(p[1][0], p[1][1]);
+  ctx.lineTo(p[2][0], p[2][1]);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+const now = () => performance.now() / 1000;
+
+// ===================== PROJECTILES =====================
+class Bullet {
+  constructor(x, y, angle, speed = 10, radius = 5, color = "#00fff5", piercing = false) {
+    this.x = x; this.y = y;
+    this.dx = Math.cos(angle); this.dy = Math.sin(angle);
+    this.speed = speed; this.radius = radius;
+    this.color = color; this.piercing = piercing;
+    this.active = true;
+  }
+  update() {
+    this.x += this.dx * this.speed;
+    this.y += this.dy * this.speed;
+    if (this.x < -20 || this.x > W + 20 || this.y < -20 || this.y > H + 20) this.active = false;
+  }
+  draw() {
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.fillStyle = this.color; ctx.fill();
+  }
+}
+
+class StrongBullet {
+  constructor(x, y, angle) {
+    this.x = x; this.y = y;
+    this.dx = Math.cos(angle); this.dy = Math.sin(angle);
+    this.speed = 17; this.radius = 14; this.active = true;
+  }
+  update() {
+    this.x += this.dx * this.speed;
+    this.y += this.dy * this.speed;
+    if (this.x < -30 || this.x > W + 30 || this.y < -30 || this.y > H + 30) this.active = false;
+  }
+  draw() {
+    const r = this.radius;
+    ctx.beginPath(); ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = "#ff2e63"; ctx.fill();
+    ctx.beginPath(); ctx.arc(this.x, this.y, r / 2, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff"; ctx.fill();
+  }
+}
+
+class Rocket {
+  constructor(x, y, target, speed = 3.8, color = "#ff9f43") {
+    this.x = x; this.y = y;
+    this.radius = 6; this.speed = speed; this.color = color;
+    this.spawnTime = now(); this.homingDuration = 5.0;
+    this.target = target; this.active = true;
+    this.angle = target ? Math.atan2(target.y - y, target.x - x) : 0;
+  }
+  update() {
+    const elapsed = now() - this.spawnTime;
+    if (elapsed <= this.homingDuration && this.target && this.target.isAlive) {
+      this.angle = Math.atan2(this.target.y - this.y, this.target.x - this.x);
+    }
+    this.x += Math.cos(this.angle) * this.speed;
+    this.y += Math.sin(this.angle) * this.speed;
+    if (this.x < -30 || this.x > W + 30 || this.y < -30 || this.y > H + 30) this.active = false;
+  }
+  draw() {
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.fillStyle = this.color; ctx.fill();
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1; ctx.stroke();
+  }
+}
+
+// ===================== PLAYER =====================
+class PlayerRed {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.radius = 18; this.baseSpeed = 5.5; this.angle = 0;
+    this.maxHp = 12; this.hp = 12;
+    this.isAlive = true; this.score = 0;
+
+    this.strongBulletCd = 20; this.lastStrongBulletTime = -20;
+    this.rocketCd = 3;        this.lastRocketTime = -3;
+    this.dashCd = 4;          this.lastDashTime = -4;
+    this.dashEndTime = 0;
+  }
+  triggerDash() {
+    const t = now();
+    if (t - this.lastDashTime >= this.dashCd) {
+      this.lastDashTime = t;
+      this.dashEndTime = t + 0.18;
+    }
+  }
+  fireStrongBullet() {
+    const t = now();
+    if (t - this.lastStrongBulletTime >= this.strongBulletCd) {
+      this.lastStrongBulletTime = t;
+      return new StrongBullet(this.x, this.y, this.angle);
+    }
+    return null;
+  }
+  fireRockets(enemies) {
+    const t = now();
+    if (t - this.lastRocketTime >= this.rocketCd) {
+      const alive = enemies.filter(e => e.isAlive);
+      if (!alive.length) return [];
+      this.lastRocketTime = t;
+      const rockets = [];
+      for (let i = 0; i < 2; i++) {
+        const target = alive[i % alive.length];
+        const off = this.angle + (i === 0 ? 1.57 : -1.57);
+        rockets.push(new Rocket(
+          this.x + Math.cos(off) * 12,
+          this.y + Math.sin(off) * 12,
+          target, 8.0, "#ff4d6d"
+        ));
+      }
+      return rockets;
+    }
+    return [];
+  }
+  move(dx, dy, aimAngle) {
+    if (!this.isAlive) return;
+    const speed = this.baseSpeed * (now() < this.dashEndTime ? 2.6 : 1.0);
+    this.x = Math.max(this.radius, Math.min(W - this.radius, this.x + dx * speed));
+    this.y = Math.max(this.radius, Math.min(H - this.radius, this.y + dy * speed));
+    this.angle = aimAngle;
+  }
+  takeDamage(n = 1) {
+    this.hp -= n;
+    if (this.hp <= 0) { this.hp = 0; this.isAlive = false; }
+  }
+}
+
+// ===================== ENEMIES =====================
+class YellowTriangle {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.radius = 22; this.baseSpeed = 8.5; this.angle = 0;
+    this.maxHp = 4; this.hp = 4; this.isAlive = true;
+    this.preferredDistance = 260;
+    this.isCharging = false; this.isDashing = false;
+    this.chargeStart = 0; this.dashDir = [0, 0];
+    this.dashTravelled = 0; this.dashMaxDist = 0;
+    this.dashTargetPos = [0, 0]; this.dashHitDone = false;
+    this.lastAttackTime = now(); this.attackInterval = 1.6;
+  }
+  takeDamage(n = 1) {
+    this.hp -= n;
+    if (this.hp <= 0) { this.hp = 0; this.isAlive = false; }
+  }
+  triggerTransAm(target) {
+    if (!this.isCharging && !this.isDashing) {
+      this.isCharging = true;
+      this.chargeStart = now();
+      this.dashTargetPos = [target.x, target.y];
+      this.dashHitDone = false;
+    }
+  }
+  updateTransAm(target, bullets) {
+    const elapsed = now() - this.chargeStart;
+    if (this.isCharging) {
+      if (elapsed >= 1.0) {
+        this.isCharging = false;
+        this.isDashing = true;
+        const dx = this.dashTargetPos[0] - this.x;
+        const dy = this.dashTargetPos[1] - this.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        this.dashDir = [dx / dist, dy / dist];
+        this.dashMaxDist = dist + 50;
+        this.dashTravelled = 0;
+      }
+    } else if (this.isDashing) {
+      const sp = this.baseSpeed * 3;
+      this.x += this.dashDir[0] * sp;
+      this.y += this.dashDir[1] * sp;
+      this.dashTravelled += sp;
+      if (!this.dashHitDone && target.isAlive &&
+          Math.hypot(target.x - this.x, target.y - this.y) < this.radius + target.radius) {
+        target.takeDamage(3);
+        this.dashHitDone = true;
+      }
+      if (this.dashTravelled >= this.dashMaxDist) this.isDashing = false;
+    }
+  }
+  update(target, enemyBullets) {
+    if (!this.isAlive || !target.isAlive) return;
+    const dx = target.x - this.x, dy = target.y - this.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    this.angle = Math.atan2(dy, dx);
+
+    if (this.isCharging || this.isDashing) {
+      this.updateTransAm(target, enemyBullets);
+    } else {
+      if (dist < this.preferredDistance - 25) {
+        this.x -= (dx / dist) * this.baseSpeed;
+        this.y -= (dy / dist) * this.baseSpeed;
+      } else if (dist > this.preferredDistance + 25) {
+        this.x += (dx / dist) * this.baseSpeed;
+        this.y += (dy / dist) * this.baseSpeed;
+      } else {
+        const px = -dy / dist, py = dx / dist;
+        this.x += px * this.baseSpeed * 0.7;
+        this.y += py * this.baseSpeed * 0.7;
+      }
+
+      if (now() - this.lastAttackTime >= this.attackInterval) {
+        this.lastAttackTime = now();
+        const choice = ["multi", "single_strong", "trans_am"][Math.floor(Math.random() * 3)];
+        if (choice === "multi") {
+          for (const s of [-0.32, -0.16, 0, 0.16, 0.32]) {
+            enemyBullets.push(new Bullet(this.x, this.y, this.angle + s, 9.5, 5, "#ffe66d"));
+          }
+        } else if (choice === "single_strong") {
+          enemyBullets.push(new Bullet(this.x, this.y, this.angle, 16, 9, "#ffffff", true));
+        } else {
+          this.triggerTransAm(target);
+        }
+      }
+    }
+    this.x = Math.max(this.radius, Math.min(W - this.radius, this.x));
+    this.y = Math.max(this.radius, Math.min(H - this.radius, this.y));
+  }
+  draw() {
+    let color = "#f9d56e";
+    if (this.isCharging) color = "#ffffff";
+    else if (this.isDashing) color = "#ff9f1c";
+    drawTri(this.x, this.y, this.radius, this.angle, color);
+    drawHpBar(this.x, this.y, this.hp, this.maxHp);
+  }
+}
+
+class BlueTriangle {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.radius = 17; this.speed = 4.8; this.angle = 0;
+    this.maxHp = 2; this.hp = 2; this.isAlive = true;
+    this.lastRocketTime = now(); this.rocketInterval = 2.0;
+  }
+  takeDamage(n = 1) {
+    this.hp -= n;
+    if (this.hp <= 0) { this.hp = 0; this.isAlive = false; }
+  }
+  update(target, enemyRockets) {
+    if (!this.isAlive || !target.isAlive) return;
+    const dx = target.x - this.x, dy = target.y - this.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    this.angle = Math.atan2(dy, dx);
+    if (dist > 120) {
+      this.x += (dx / dist) * this.speed;
+      this.y += (dy / dist) * this.speed;
+    }
+    if (now() - this.lastRocketTime >= this.rocketInterval) {
+      this.lastRocketTime = now();
+      for (let i = 0; i < 3; i++) {
+        if (enemyRockets.length < 10) {
+          enemyRockets.push(new Rocket(this.x, this.y, target, 3.8, "#ff9f43"));
+        }
+      }
+    }
+    this.x = Math.max(this.radius, Math.min(W - this.radius, this.x));
+    this.y = Math.max(this.radius, Math.min(H - this.radius, this.y));
+  }
+  draw() {
+    drawTri(this.x, this.y, this.radius, this.angle, "#00adb5");
+    drawHpBar(this.x, this.y, this.hp, this.maxHp);
+  }
+}
+
+class PurpleTriangle {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.radius = 23; this.speed = 3.6; this.angle = 0;
+    this.maxHp = 6; this.hp = 6; this.isAlive = true;
+    this.preferredDistance = 300;
+    this.lastShotTime = now(); this.shotInterval = 0.9;
+  }
+  takeDamage(n = 1) {
+    this.hp -= n;
+    if (this.hp <= 0) { this.hp = 0; this.isAlive = false; }
+  }
+  update(target, enemyBullets) {
+    if (!this.isAlive || !target.isAlive) return;
+    const dx = target.x - this.x, dy = target.y - this.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    this.angle = Math.atan2(dy, dx);
+    if (dist < this.preferredDistance - 25) {
+      this.x -= (dx / dist) * this.speed;
+      this.y -= (dy / dist) * this.speed;
+    } else if (dist > this.preferredDistance + 25) {
+      this.x += (dx / dist) * this.speed;
+      this.y += (dy / dist) * this.speed;
+    } else {
+      const px = dy / dist, py = -dx / dist;
+      this.x += px * this.speed * 0.6;
+      this.y += py * this.speed * 0.6;
+    }
+    if (now() - this.lastShotTime >= this.shotInterval) {
+      this.lastShotTime = now();
+      enemyBullets.push(new Bullet(this.x, this.y, this.angle, 9, 6, "#c77dff"));
+    }
+    this.x = Math.max(this.radius, Math.min(W - this.radius, this.x));
+    this.y = Math.max(this.radius, Math.min(H - this.radius, this.y));
+  }
+  draw() {
+    drawTri(this.x, this.y, this.radius, this.angle, "#9d4edd");
+    drawHpBar(this.x, this.y, this.hp, this.maxHp);
+  }
+}
+
+function drawHpBar(x, y, hp, maxHp, color = "#ff2e63") {
+  const bw = 42, bh = 5;
+  const bx = x - bw / 2, by = y - 32;
+  ctx.fillStyle = "#2b2d42";
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.fillStyle = color;
+  ctx.fillRect(bx, by, (bw * hp) / maxHp, bh);
+}
+
+// ===================== GAME =====================
+class Game {
+  constructor() {
+    this.touchMode = false;
+    this.state = "select"; // "select" | "playing"
+    this.buttons = []; // mode select buttons
+
+    this.player = null;
+    this.enemies = [];
+    this.redBullets = [];
+    this.redStrongBullets = [];
+    this.redRockets = [];
+    this.enemyBullets = [];
+    this.enemyRockets = [];
+
+    this.isShooting = false;
+    this.lastAutoShootTime = 0;
+    this.autoShootInterval = 0.12;
+
+    this.mousePos = [W / 2, H / 2];
+    this.keys = {};
+
+    // Joysticks
+    this.lJoy = { cx: 0, cy: 0, r: 0, kx: 0, ky: 0, active: false, touchId: null };
+    this.rJoy = { cx: 0, cy: 0, r: 0, kx: 0, ky: 0, active: false, touchId: null };
+    this.leftMoveDir = [0, 0];
+    this.rightAimAngle = 0;
+    this.rightFiring = false;
+
+    // Skill buttons
+    this.skillR = 32;
+    this.rocketBtn = { cx: 0, cy: 0 };
+    this.powerBtn  = { cx: 0, cy: 0 };
+    this.powerShotPending = false;
+
+    // Track touches: touchId -> { type: 'ljoy'|'rjoy'|'rocket'|'power' }
+    this.touches = new Map();
+
+    this.reset();
+  }
+
+  reset() {
+    this.player = new PlayerRed(200, 360);
+    this.enemies = [
+      new YellowTriangle(800, 150), new YellowTriangle(800, 550), new YellowTriangle(850, 360),
+      new BlueTriangle(850, 100),   new BlueTriangle(850, 620),   new BlueTriangle(900, 360),
+      new PurpleTriangle(920, 200), new PurpleTriangle(920, 520), new PurpleTriangle(950, 360),
+    ];
+    this.redBullets = [];
+    this.redStrongBullets = [];
+    this.redRockets = [];
+    this.enemyBullets = [];
+    this.enemyRockets = [];
+    this.isShooting = false;
+  }
+
+  setupJoysticks() {
+    const r = Math.min(W, H) * 0.13;
+    this.lJoy.r = r; this.rJoy.r = r;
+    this.lJoy.cx = r + 20;      this.lJoy.cy = H - r - 20;
+    this.rJoy.cx = W - r - 20;  this.rJoy.cy = H - r - 20;
+    this.lJoy.kx = this.lJoy.cx; this.lJoy.ky = this.lJoy.cy;
+    this.rJoy.kx = this.rJoy.cx; this.rJoy.ky = this.rJoy.cy;
+    this.skillR = 32;
+    this.rocketBtn.cx = W - 110; this.rocketBtn.cy = 50;
+    this.powerBtn.cx  = W - 40;  this.powerBtn.cy  = 50;
+  }
+
+  spawnRandomEnemy() {
+    const side = Math.floor(Math.random() * 4);
+    let x, y;
+    if (side === 0)      { x = 50 + Math.random() * (W - 100); y = 30; }
+    else if (side === 1) { x = 50 + Math.random() * (W - 100); y = H - 30; }
+    else if (side === 2) { x = 30; y = 50 + Math.random() * (H - 100); }
+    else                 { x = W - 30; y = 50 + Math.random() * (H - 100); }
+    const cls = [YellowTriangle, BlueTriangle, PurpleTriangle][Math.floor(Math.random() * 3)];
+    return new cls(x, y);
+  }
+
+  // ---------- INPUT ----------
+  start(touchMode) {
+    this.touchMode = touchMode;
+    this.state = "playing";
+    if (touchMode) this.setupJoysticks();
+    this.reset();
+  }
+
+  onPointerDown(id, x, y) {
+    if (this.state === "select") {
+      for (const b of this.buttons) {
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+          this.start(b.touch);
+          return;
+        }
+      }
+      return;
+    }
+
+    if (!this.touchMode) {
+      // Mouse: left click = fire
+      if (id === "mouse") {
+        if (this.player.isAlive) this.isShooting = true;
+      }
+      return;
+    }
+
+    // Touch mode: classify the touch
+    // Skill buttons
+    if (Math.hypot(x - this.rocketBtn.cx, y - this.rocketBtn.cy) < this.skillR) {
+      this.touches.set(id, "rocket");
+      if (this.player.isAlive) {
+        this.redRockets.push(...this.player.fireRockets(this.enemies));
+      }
+      return;
+    }
+    if (Math.hypot(x - this.powerBtn.cx, y - this.powerBtn.cy) < this.skillR) {
+      this.touches.set(id, "power");
+      if (this.player.isAlive) {
+        if (this.rightFiring) {
+          // Wait until the right joystick releases
+          this.powerShotPending = true;
+        } else {
+          const sb = this.player.fireStrongBullet();
+          if (sb) this.redStrongBullets.push(sb);
+        }
+      }
+      return;
+    }
+
+    // Joysticks
+    if (Math.hypot(x - this.lJoy.cx, y - this.lJoy.cy) < this.lJoy.r * 1.6) {
+      this.touches.set(id, "ljoy");
+      this.lJoy.active = true; this.lJoy.touchId = id;
+      this.updateLJoy(x, y);
+      return;
+    }
+    if (Math.hypot(x - this.rJoy.cx, y - this.rJoy.cy) < this.rJoy.r * 1.6) {
+      this.touches.set(id, "rjoy");
+      this.rJoy.active = true; this.rJoy.touchId = id;
+      this.rightFiring = true;
+      this.updateRJoy(x, y);
+      return;
+    }
+
+    // Fallback on touch mode: also allow screen-relative touches
+    // to control the right joystick (useful if finger slips off).
+    if (x > W / 2) {
+      this.touches.set(id, "rjoy");
+      this.rJoy.active = true; this.rJoy.touchId = id;
+      this.rightFiring = true;
+      this.updateRJoy(x, y);
+    } else {
+      this.touches.set(id, "ljoy");
+      this.lJoy.active = true; this.lJoy.touchId = id;
+      this.updateLJoy(x, y);
+    }
+  }
+
+  onPointerMove(id, x, y) {
+    if (this.state === "select") return;
+    if (!this.touchMode) {
+      if (id === "mouse") this.mousePos = [x, y];
+      return;
+    }
+    const t = this.touches.get(id);
+    if (t === "ljoy") this.updateLJoy(x, y);
+    else if (t === "rjoy") this.updateRJoy(x, y);
+  }
+
+  onPointerUp(id) {
+    if (this.state === "select") return;
+    if (!this.touchMode) {
+      if (id === "mouse") this.isShooting = false;
+      return;
+    }
+    const t = this.touches.get(id);
+    if (t === "ljoy") {
+      this.lJoy.active = false; this.lJoy.touchId = null;
+      this.leftMoveDir = [0, 0];
+      this.lJoy.kx = this.lJoy.cx; this.lJoy.ky = this.lJoy.cy;
+    } else if (t === "rjoy") {
+      this.rJoy.active = false; this.rJoy.touchId = null;
+      this.rightFiring = false;
+      this.rJoy.kx = this.rJoy.cx; this.rJoy.ky = this.rJoy.cy;
+      // Fire pending power shot on release
+      if (this.powerShotPending && this.player.isAlive) {
+        this.powerShotPending = false;
+        const sb = this.player.fireStrongBullet();
+        if (sb) this.redStrongBullets.push(sb);
+      }
+    }
+    this.touches.delete(id);
+  }
+
+  updateLJoy(x, y) {
+    let dx = x - this.lJoy.cx, dy = y - this.lJoy.cy;
+    const d = Math.hypot(dx, dy);
+    if (d > this.lJoy.r) {
+      dx = dx / d * this.lJoy.r;
+      dy = dy / d * this.lJoy.r;
+    }
+    this.lJoy.kx = this.lJoy.cx + dx;
+    this.lJoy.ky = this.lJoy.cy + dy;
+    const nd = Math.hypot(dx, dy);
+    if (nd > 5) this.leftMoveDir = [dx / nd, dy / nd];
+    else this.leftMoveDir = [0, 0];
+  }
+
+  updateRJoy(x, y) {
+    let dx = x - this.rJoy.cx, dy = y - this.rJoy.cy;
+    const d = Math.hypot(dx, dy);
+    if (d > this.rJoy.r) {
+      dx = dx / d * this.rJoy.r;
+      dy = dy / d * this.rJoy.r;
+    }
+    this.rJoy.kx = this.rJoy.cx + dx;
+    this.rJoy.ky = this.rJoy.cy + dy;
+    if (d > 5) this.rightAimAngle = Math.atan2(dy, dx);
+  }
+
+  onKey(k, isDown) {
+    k = k.toLowerCase();
+    this.keys[k] = isDown;
+    if (k === "r" && isDown && this.state === "playing") this.reset();
+    if (!isDown || this.state !== "playing" || !this.player.isAlive) return;
+    if (this.touchMode) return;
+    if (k === "c") {
+      const sb = this.player.fireStrongBullet();
+      if (sb) this.redStrongBullets.push(sb);
+    } else if (k === "e") {
+      this.redRockets.push(...this.player.fireRockets(this.enemies));
+    } else if (k === " ") {
+      this.player.triggerDash();
+    }
+  }
+
+  // ---------- UPDATE ----------
+  update(dt) {
+    if (this.state !== "playing") return;
+
+    // Aim
+    let aimAngle;
+    if (this.touchMode) {
+      aimAngle = this.rightAimAngle;
+    } else {
+      aimAngle = Math.atan2(this.mousePos[1] - this.player.y, this.mousePos[0] - this.player.x);
+    }
+
+    // Firing
+    const t = now();
+    const firing = (!this.touchMode && this.isShooting) || (this.touchMode && this.rightFiring);
+    if (firing && this.player.isAlive && t - this.lastAutoShootTime >= this.autoShootInterval) {
+      this.lastAutoShootTime = t;
+      this.redBullets.push(new Bullet(this.player.x, this.player.y, aimAngle, 12, 5, "#00fff5"));
+    }
+
+    // Movement
+    let dx = 0, dy = 0;
+    if (this.touchMode) {
+      [dx, dy] = this.leftMoveDir;
+    } else {
+      if (this.keys["w"] || this.keys["arrowup"])    dy -= 1;
+      if (this.keys["s"] || this.keys["arrowdown"])  dy += 1;
+      if (this.keys["a"] || this.keys["arrowleft"])  dx -= 1;
+      if (this.keys["d"] || this.keys["arrowright"]) dx += 1;
+    }
+    if (dx || dy) {
+      const n = Math.hypot(dx, dy);
+      this.player.move(dx / n, dy / n, aimAngle);
+    } else {
+      this.player.move(0, 0, aimAngle);
+    }
+
+    // Enemies
+    const newEnemies = [];
+    for (const e of this.enemies) {
+      if (e instanceof YellowTriangle)      e.update(this.player, this.enemyBullets);
+      else if (e instanceof BlueTriangle)   e.update(this.player, this.enemyRockets);
+      else                                  e.update(this.player, this.enemyBullets);
+      if (e.isAlive) newEnemies.push(e);
+      else { this.player.score += 100; newEnemies.push(this.spawnRandomEnemy()); }
+    }
+    this.enemies = newEnemies;
+
+    // Projectiles
+    for (const b of this.redBullets)       b.update();
+    for (const b of this.redStrongBullets) b.update();
+    for (const r of this.redRockets)       r.update();
+    for (const b of this.enemyBullets)     b.update();
+    for (const r of this.enemyRockets)     r.update();
+
+    // Collisions: player bullets vs enemies
+    for (const b of this.redBullets) {
+      if (!b.active) continue;
+      for (const e of this.enemies) {
+        if (e.isAlive && Math.hypot(b.x - e.x, b.y - e.y) < e.radius + b.radius) {
+          b.active = false; e.takeDamage(1); break;
+        }
+      }
+    }
+    for (const sb of this.redStrongBullets) {
+      if (!sb.active) continue;
+      for (const e of this.enemies) {
+        if (e.isAlive && Math.hypot(sb.x - e.x, sb.y - e.y) < e.radius + sb.radius) e.takeDamage(99);
+      }
+    }
+    for (const r of this.redRockets) {
+      if (!r.active) continue;
+      for (const e of this.enemies) {
+        if (e.isAlive && Math.hypot(r.x - e.x, r.y - e.y) < e.radius + r.radius) {
+          r.active = false; e.takeDamage(2); break;
+        }
+      }
+    }
+
+    // Collisions: enemies vs player
+    if (this.player.isAlive) {
+      for (const b of this.enemyBullets) {
+        if (b.active && Math.hypot(b.x - this.player.x, b.y - this.player.y) < this.player.radius + b.radius) {
+          if (!b.piercing) b.active = false;
+          else { b.x += b.dx * this.player.radius * 2.5; b.y += b.dy * this.player.radius * 2.5; }
+          this.player.takeDamage(1);
+        }
+      }
+      for (const r of this.enemyRockets) {
+        if (r.active && Math.hypot(r.x - this.player.x, r.y - this.player.y) < this.player.radius + r.radius) {
+          r.active = false; this.player.takeDamage(1);
+        }
+      }
+    }
+
+    // Cleanup
+    this.redBullets       = this.redBullets.filter(b => b.active);
+    this.redStrongBullets = this.redStrongBullets.filter(b => b.active);
+    this.redRockets       = this.redRockets.filter(r => r.active);
+    this.enemyBullets     = this.enemyBullets.filter(b => b.active);
+    this.enemyRockets     = this.enemyRockets.filter(r => r.active);
+  }
+
+  // ---------- DRAW ----------
+  draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#0b0c10"; ctx.fillRect(0, 0, W, H);
+
+    if (this.state === "select") return this.drawSelect();
+
+    // Player
+    if (this.player.isAlive) {
+      const color = now() < this.player.dashEndTime ? "#ff8fa3" : "#ff2e63";
+      drawTri(this.player.x, this.player.y, this.player.radius, this.player.angle, color);
+      drawHpBar(this.player.x, this.player.y, this.player.hp, this.player.maxHp, "#06d6a0");
+    }
+
+    // Enemies
+    for (const e of this.enemies) if (e.isAlive) e.draw();
+
+    // Projectiles
+    for (const b of this.redBullets)       b.draw();
+    for (const b of this.redStrongBullets) b.draw();
+    for (const r of this.redRockets)       r.draw();
+    for (const b of this.enemyBullets)     b.draw();
+    for (const r of this.enemyRockets)     r.draw();
+
+    // Joysticks
+    if (this.touchMode) {
+      this.drawJoystick(this.lJoy, "#00fff5", "#334455");
+      this.drawJoystick(this.rJoy, "#ff2e63", "#553344");
+      if (this.rJoy.active) {
+        const ex = this.rJoy.cx + Math.cos(this.rightAimAngle) * (this.rJoy.r + 20);
+        const ey = this.rJoy.cy + Math.sin(this.rightAimAngle) * (this.rJoy.r + 20);
+        ctx.setLineDash([5, 5]);
+        ctx.strokeStyle = "#ff2e63"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(this.rJoy.cx, this.rJoy.cy); ctx.lineTo(ex, ey); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    // Skill buttons
+    const t = now();
+    const rkLeft = this.player.rocketCd - (t - this.player.lastRocketTime);
+    const sbLeft = this.player.strongBulletCd - (t - this.player.lastStrongBulletTime);
+    this.drawSkillButton(this.rocketBtn, "rocket", "E / Tap",
+      Math.max(0, rkLeft / this.player.rocketCd), this.touches.size && this.touchesValueHas("rocket"));
+    this.drawSkillButton(this.powerBtn, "power", "C / Tap",
+      Math.max(0, sbLeft / this.player.strongBulletCd), this.touchesValueHas("power"));
+
+    // HUD
+    this.drawHud();
+
+    if (!this.player.isAlive) {
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#ff2e63";
+      ctx.font = "bold 28px Helvetica";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("GAME OVER — Press R to Restart", W / 2, H / 2);
+      ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    }
+  }
+
+  touchesValueHas(val) {
+    for (const v of this.touches.values()) if (v === val) return true;
+    return false;
+  }
+
+  drawJoystick(j, activeColor, inactiveColor) {
+    ctx.strokeStyle = j.active ? activeColor : inactiveColor;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(j.cx, j.cy, j.r, 0, Math.PI * 2); ctx.stroke();
+    if (j.active) {
+      ctx.beginPath(); ctx.moveTo(j.cx, j.cy); ctx.lineTo(j.kx, j.ky);
+      ctx.strokeStyle = activeColor; ctx.stroke();
+    }
+    const kr = j.r * 0.35;
+    ctx.beginPath(); ctx.arc(j.kx, j.ky, kr, 0, Math.PI * 2);
+    ctx.fillStyle = j.active ? activeColor : inactiveColor; ctx.fill();
+  }
+
+  drawSkillButton(btn, symbol, label, cdFrac, pressed) {
+    const r = this.skillR;
+    ctx.beginPath(); ctx.arc(btn.cx, btn.cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = pressed ? "#2a2a4e" : "#1a1a2e"; ctx.fill();
+    ctx.strokeStyle = "#555"; ctx.lineWidth = 2; ctx.stroke();
+
+    if (cdFrac > 0) {
+      ctx.beginPath();
+      ctx.moveTo(btn.cx, btn.cy);
+      ctx.arc(btn.cx, btn.cy, r, -Math.PI / 2, -Math.PI / 2 + cdFrac * Math.PI * 2);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(11,12,16,0.85)"; ctx.fill();
+    }
+
+    // Symbol — drawn at ~50% opacity
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = "#dddddd";
+    if (symbol === "rocket") {
+      ctx.beginPath();
+      const s = r * 0.5;
+      ctx.moveTo(btn.cx, btn.cy - s);
+      ctx.lineTo(btn.cx + s * 0.5, btn.cy);
+      ctx.lineTo(btn.cx + s * 0.3, btn.cy + s * 0.6);
+      ctx.lineTo(btn.cx - s * 0.3, btn.cy + s * 0.6);
+      ctx.lineTo(btn.cx - s * 0.5, btn.cy);
+      ctx.closePath();
+      ctx.fill();
+      // flame
+      ctx.beginPath();
+      ctx.moveTo(btn.cx - s * 0.25, btn.cy + s * 0.6);
+      ctx.lineTo(btn.cx + s * 0.25, btn.cy + s * 0.6);
+      ctx.lineTo(btn.cx, btn.cy + s * 1.1);
+      ctx.closePath();
+      ctx.fillStyle = "#884444"; ctx.fill();
+    } else {
+      // star
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) {
+        const a = i * Math.PI / 4;
+        const rr = r * (i % 2 === 0 ? 0.5 : 0.25);
+        const px = btn.cx + Math.cos(a) * rr;
+        const py = btn.cy + Math.sin(a) * rr;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
+
+    ctx.fillStyle = "#aaaaaa";
+    ctx.font = "10px Helvetica";
+    ctx.textAlign = "center";
+    ctx.fillText(label, btn.cx, btn.cy + r + 14);
+    ctx.textAlign = "left";
+  }
+
+  drawHud() {
+    const t = now();
+    const dsLeft = this.player.dashCd - (t - this.player.lastDashTime);
+    const lines = [];
+    lines.push(`Red HP: ${this.player.hp}/${this.player.maxHp}  |  Score: ${this.player.score}  |  Enemies: ${this.enemies.length}`);
+    if (this.touchMode) {
+      lines.push("TOUCH MODE — Left joystick: Move | Right joystick: Aim & Fire");
+      lines.push("Tap top-right icons for skills | Power shot fires on joystick release");
+    } else {
+      lines.push(`[Hold Left Click] Fire | [E / Right Click] Rockets`);
+      lines.push(`[C] Strong Piercing | [Space] Dash: ${dsLeft <= 0 ? "READY" : dsLeft.toFixed(1) + "s"} | [R] Restart`);
+    }
+    ctx.fillStyle = "#e0e0e0";
+    ctx.font = "13px Helvetica";
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    lines.forEach((line, i) => ctx.fillText(line, 12, 12 + i * 20));
+  }
+
+  drawSelect() {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff2e63";
+    ctx.font = "bold 34px Helvetica";
+    ctx.fillText("TRIANGLE BATTLE ARENA", W / 2, 140);
+
+    ctx.fillStyle = "#e0e0e0";
+    ctx.font = "18px Helvetica";
+    ctx.fillText("Select Control Mode", W / 2, 190);
+
+    this.buttons = [];
+    const bw = Math.min(320, W * 0.36), bh = 90;
+
+    // Keyboard button
+    const kbX = W / 2 - bw - 30, kbY = 260;
+    ctx.fillStyle = "#1a1a2e";
+    ctx.fillRect(kbX, kbY, bw, bh);
+    ctx.strokeStyle = "#ff2e63"; ctx.lineWidth = 2;
+    ctx.strokeRect(kbX, kbY, bw, bh);
+    ctx.fillStyle = "#00fff5"; ctx.font = "bold 16px Helvetica";
+    ctx.fillText("KEYBOARD + MOUSE", kbX + bw / 2, kbY + 30);
+    ctx.fillStyle = "#888"; ctx.font = "11px Helvetica";
+    ctx.fillText("WASD / Space | Left Click Fire", kbX + bw / 2, kbY + 55);
+    ctx.fillText("E Rocket | C Power", kbX + bw / 2, kbY + 72);
+    this.buttons.push({ x: kbX, y: kbY, w: bw, h: bh, touch: false });
+
+    // Touch button
+    const tcX = W / 2 + 30, tcY = 260;
+    ctx.fillStyle = "#1a1a2e";
+    ctx.fillRect(tcX, tcY, bw, bh);
+    ctx.strokeStyle = "#00fff5"; ctx.lineWidth = 2;
+    ctx.strokeRect(tcX, tcY, bw, bh);
+    ctx.fillStyle = "#00fff5"; ctx.font = "bold 16px Helvetica";
+    ctx.fillText("TOUCHSCREEN", tcX + bw / 2, tcY + 30);
+    ctx.fillStyle = "#888"; ctx.font = "11px Helvetica";
+    ctx.fillText("Left Joystick Move", tcX + bw / 2, tcY + 55);
+    ctx.fillText("Right Joystick Aim & Fire", tcX + bw / 2, tcY + 72);
+    this.buttons.push({ x: tcX, y: tcY, w: bw, h: bh, touch: true });
+
+    ctx.fillStyle = "#666"; ctx.font = "13px Helvetica";
+    ctx.fillText("Touch mode: skills appear in the top-right corner.", W / 2, 420);
+    ctx.fillText("Power shot fires in the last aim direction when you release the right joystick.", W / 2, 442);
+  }
+}
+
+// ===================== INPUT WIRING =====================
+const game = new Game();
+
+// Pointer events unify mouse, touch, and pen on modern browsers (iPad Safari included).
+// We keep touch identifiers so multi-touch works — one finger per joystick.
+function isTouchEvent(e) { return e.pointerType === "touch" || e.pointerType === "pen"; }
+function idFor(e) {
+  return isTouchEvent(e) ? "t" + e.pointerId : "mouse";
+}
+function getXY(e) {
+  const r = canvas.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+canvas.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  const [x, y] = getXY(e);
+  game.onPointerDown(idFor(e), x, y);
+  if (e.pointerType === "mouse") {
+    game.mousePos = [x, y];
+    if (game.state === "playing" && !game.touchMode && game.player && game.player.isAlive) {
+      // mouse left click = fire handled in onPointerDown
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener("pointermove", e => {
+  const [x, y] = getXY(e);
+  game.onPointerMove(idFor(e), x, y);
+}, { passive: false });
+
+canvas.addEventListener("pointerup", e => {
+  game.onPointerUp(idFor(e));
+}, { passive: false });
+
+canvas.addEventListener("pointercancel", e => {
+  game.onPointerUp(idFor(e));
+}, { passive: false });
+
+// Prevent scroll/zoom from interfering with gameplay
+canvas.addEventListener("touchstart", e => e.preventDefault(), { passive: false });
+canvas.addEventListener("touchmove",  e => e.preventDefault(), { passive: false });
+
+// Keyboard
+window.addEventListener("keydown", e => {
+  game.onKey(e.key, true);
+  if ([" ", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(e.key.toLowerCase())) {
+    e.preventDefault();
+  }
+});
+window.addEventListener("keyup", e => game.onKey(e.key, false));
+
+// Context menu: use right-click for rockets in keyboard mode
+canvas.addEventListener("contextmenu", e => {
+  e.preventDefault();
+  if (game.state === "playing" && !game.touchMode && game.player && game.player.isAlive) {
+    game.redRockets.push(...game.player.fireRockets(game.enemies));
+  }
+});
+
+// ===================== MAIN LOOP =====================
+let last = performance.now();
+function loop(t) {
+  const dt = Math.min(0.05, (t - last) / 1000);
+  last = t;
+  game.update(dt);
+  game.draw();
+  requestAnimationFrame(loop);
+}
+
+resize();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
