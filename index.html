@@ -71,14 +71,17 @@ class Bullet {
     this.radius = radius;
     this.color = color; this.piercing = piercing;
     this.active = true;
-    this.lockOnTarget = null; // for lockon skill
+    this.lockOnTarget = null;
     this.damageMult = 1;
+    this.fromHelper = false;
   }
-  update(enemies) {
-    // Lockon: home toward target
+  update() {
     if (this.lockOnTarget && this.lockOnTarget.isAlive) {
-      const ang = Math.atan2(this.lockOnTarget.y - this.y, this.lockOnTarget.x - this.x);
-      this.dx = Math.cos(ang); this.dy = Math.sin(ang);
+      const d = Math.hypot(this.lockOnTarget.x - this.x, this.lockOnTarget.y - this.y);
+      if (d < 140) {
+        const ang = Math.atan2(this.lockOnTarget.y - this.y, this.lockOnTarget.x - this.x);
+        this.dx = Math.cos(ang); this.dy = Math.sin(ang);
+      }
     }
     this.x += this.dx * this.speed; this.y += this.dy * this.speed;
     if (this.x < -20 || this.x > W + 20 || this.y < -20 || this.y > H + 20) this.active = false;
@@ -98,11 +101,15 @@ class StrongBullet {
     this.active = true;
     this.lockOnTarget = null;
     this.damageMult = 1;
+    this.fromHelper = false;
   }
   update() {
     if (this.lockOnTarget && this.lockOnTarget.isAlive) {
-      const ang = Math.atan2(this.lockOnTarget.y - this.y, this.lockOnTarget.x - this.x);
-      this.dx = Math.cos(ang); this.dy = Math.sin(ang);
+      const d = Math.hypot(this.lockOnTarget.x - this.x, this.lockOnTarget.y - this.y);
+      if (d < 140) {
+        const ang = Math.atan2(this.lockOnTarget.y - this.y, this.lockOnTarget.x - this.x);
+        this.dx = Math.cos(ang); this.dy = Math.sin(ang);
+      }
     }
     this.x += this.dx * this.speed; this.y += this.dy * this.speed;
     if (this.x < -30 || this.x > W + 30 || this.y < -30 || this.y > H + 30) this.active = false;
@@ -110,31 +117,26 @@ class StrongBullet {
   draw() {
     const r = this.radius;
     ctx.beginPath(); ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = "#ff2e63"; ctx.fill();
+    ctx.fillStyle = this.fromHelper ? "#bbbbbb" : "#ff2e63"; ctx.fill();
     ctx.beginPath(); ctx.arc(this.x, this.y, r / 2, 0, Math.PI * 2);
     ctx.fillStyle = "#ffffff"; ctx.fill();
   }
 }
 
-/*
-  Green rocket (new logic):
-  - 7 rockets per salvo
-  - Fast, follows player's NEW position (re-homes)
-  - Explodes if not hitting red within 2 seconds
-  - Orange triangle shape
-*/
 class Rocket {
-  constructor(x, y, target, speed = 6.5, color = "#ff9f43") {
+  constructor(x, y, target, speed = 6.5, color = "#ff9f43", fromHelper = false) {
     this.x = x; this.y = y;
     this.radius = 7; this.size = 8;
     this.speed = speed * SPEED_MULT;
     this.color = color;
     this.spawnTime = now();
-    this.lifetime = 2.0;  // explode after 2s
+    this.lifetime = 2.0;
     this.maxTurnRate = 0.08;
     this.target = target;
     this.active = true;
     this.angle = target ? Math.atan2(target.y - y, target.x - x) : 0;
+    this.damage = 1;
+    this.fromHelper = fromHelper;
   }
   update() {
     const elapsed = now() - this.spawnTime;
@@ -170,8 +172,7 @@ class PlayerRed {
     this.dashCd = 4;          this.lastDashTime = -4;
     this.dashEndTime = 0;
 
-    // Equipped skills
-    this.equipped = [];  // list of skill keys
+    this.equipped = [];
 
     // Shield
     this.shieldHp = 0;
@@ -190,10 +191,9 @@ class PlayerRed {
     // Lockon
     this.lockonActive = false;
     this.lockonSelecting = false;
-    this.lockonPath = [];  // circles
+    this.lockonPath = [];
     this.lockonCd = 25;
     this.lockonLastUsed = -25;
-    this.lockonTargets = [];
 
     // Fake (absorb)
     this.fakeActive = false;
@@ -203,6 +203,18 @@ class PlayerRed {
     this.fakeLastUsed = -20;
     this.fakeAbsorbed = 0;
     this.fakeOrbsAngle = 0;
+    this.fakeMode = "follow";
+    this.fakeOrbCooldowns = [0, 0];
+
+    // Help
+    this.helpActive = false;
+    this.helpStart = 0;
+    this.helpDuration = 12;
+    this.helpCd = 30;
+    this.helpLastUsed = -30;
+    this.helpers = [];
+
+    this.damageTakenThisLife = 0;
   }
 
   hasSkill(key) { return this.equipped.includes(key); }
@@ -213,42 +225,30 @@ class PlayerRed {
       this.lastDashTime = t; this.dashEndTime = t + 0.18;
     }
   }
+
   fireStrongBullet(enemies) {
     const t = now();
     if (t - this.lastStrongBulletTime >= this.strongBulletCd) {
       this.lastStrongBulletTime = t;
       const sb = new StrongBullet(this.x, this.y, this.angle);
-      // Lockon: aim at nearest locked-on target
       const locked = this.getLockonTargets();
-      if (locked.length) {
-        let best = null, bestD = Infinity;
-        for (const e of locked) {
-          const d = Math.hypot(e.x - this.x, e.y - this.y);
-          if (d < bestD) { bestD = d; best = e; }
-        }
-        if (best) {
-          sb.lockOnTarget = best;
-          sb.damageMult = 1.5;
-          sb.angle = Math.atan2(best.y - this.y, best.x - this.x);
-          sb.dx = Math.cos(sb.angle); sb.dy = Math.sin(sb.angle);
-        }
-      } else {
-        // Aim at nearest enemy
-        let best = null, bestD = Infinity;
-        for (const e of enemies) {
-          if (!e.isAlive) continue;
-          const d = Math.hypot(e.x - this.x, e.y - this.y);
-          if (d < bestD) { bestD = d; best = e; }
-        }
-        if (best) {
-          sb.angle = Math.atan2(best.y - this.y, best.x - this.x);
-          sb.dx = Math.cos(sb.angle); sb.dy = Math.sin(sb.angle);
-        }
+      const pool = locked.length ? locked : enemies;
+      let best = null, bestD = Infinity;
+      for (const e of pool) {
+        if (!e.isAlive) continue;
+        const d = Math.hypot(e.x - this.x, e.y - this.y);
+        if (d < bestD) { bestD = d; best = e; }
+      }
+      if (best) {
+        sb.angle = Math.atan2(best.y - this.y, best.x - this.x);
+        sb.dx = Math.cos(sb.angle); sb.dy = Math.sin(sb.angle);
+        if (locked.includes(best)) { sb.lockOnTarget = best; sb.damageMult = 1.5; }
       }
       return sb;
     }
     return null;
   }
+
   fireRockets(enemies) {
     const t = now();
     if (t - this.lastRocketTime >= this.rocketCd) {
@@ -261,12 +261,13 @@ class PlayerRed {
         const spread = (i - 2) * 0.35;
         const off = this.angle + spread;
         rockets.push(new Rocket(this.x + Math.cos(off) * 14, this.y + Math.sin(off) * 14,
-                                target, 5.5, "#ff9f43"));
+                                target, 5.5, "#ff9f43", false));
       }
       return rockets;
     }
     return [];
   }
+
   activateShield() {
     const t = now();
     if (!this.hasSkill("shield")) return;
@@ -299,12 +300,10 @@ class PlayerRed {
   commitLockon() {
     this.lockonLastUsed = now();
     this.lockonSelecting = false;
-    // Determine locked-on enemies (those inside any lockon circle)
     this.lockonActive = true;
   }
   getLockonTargets() {
     if (!this.lockonActive) return [];
-    if (!this.lockonPath.length) return [];
     const targets = [];
     for (const e of game.enemies) {
       if (!e.isAlive) continue;
@@ -322,7 +321,26 @@ class PlayerRed {
     this.fakeActive = true;
     this.fakeStart = t;
     this.fakeAbsorbed = 0;
+    this.fakeMode = Math.random() < 0.5 ? "follow" : "attack";
+    this.fakeOrbCooldowns = [0, 0];
+    this.damageTakenThisLife = 0;
   }
+  activateHelp() {
+    const t = now();
+    if (!this.hasSkill("help")) return;
+    if (this.helpActive) return;
+    if (t - this.helpLastUsed < this.helpCd) return;
+    this.helpActive = true;
+    this.helpStart = t;
+    this.helpers = [];
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      const hx = this.x + Math.cos(a) * 60;
+      const hy = this.y + Math.sin(a) * 60;
+      this.helpers.push(new Helper(hx, hy, [...this.equipped]));
+    }
+  }
+
   move(dx, dy, aimAngle) {
     if (!this.isAlive) return;
     if (this.isStriking) return;
@@ -331,6 +349,7 @@ class PlayerRed {
     this.y = Math.max(this.radius, Math.min(H - this.radius, this.y + dy * speed));
     this.angle = aimAngle;
   }
+
   updateStrike() {
     if (!this.isStriking) return;
     const speed = 22 * SPEED_MULT;
@@ -347,11 +366,12 @@ class PlayerRed {
     for (const tr of this.strikeTrail) tr.life -= 0.016;
     this.strikeTrail = this.strikeTrail.filter(t => t.life > 0);
   }
+
   updateFake() {
     if (!this.fakeActive) return;
     const t = now();
+    this.fakeOrbsAngle += 0.08;
     if (t - this.fakeStart >= this.fakeDuration) {
-      // End: convert absorbed damage into healing (with difficulty multiplier)
       const diff = game.difficultyKey;
       const mult = (diff === "master" || diff === "hell") ? 0.5 : 1.0;
       const heal = Math.floor(this.fakeAbsorbed * 1.5 * mult);
@@ -359,15 +379,19 @@ class PlayerRed {
       this.fakeActive = false;
       this.fakeLastUsed = t;
       this.fakeAbsorbed = 0;
-    } else {
-      this.fakeOrbsAngle += 0.1;
+      // Mandatory damage on fake end — at least 1 damage
+      this.takeMandatoryDamage(1);
     }
+  }
+  takeMandatoryDamage(n) {
+    this.hp -= n;
+    if (this.hp <= 0) { this.hp = 0; this.isAlive = false; }
   }
   takeDamage(n = 1) {
     if (this.isStriking) return;
     if (this.fakeActive) {
       this.fakeAbsorbed += n;
-      return; // absorb, no HP loss
+      return;
     }
     if (this.shieldHp > 0) {
       const absorbed = Math.min(this.shieldHp, n);
@@ -380,6 +404,7 @@ class PlayerRed {
     }
     if (n <= 0) return;
     this.hp -= n;
+    this.damageTakenThisLife += n;
     if (this.hp <= 0) { this.hp = 0; this.isAlive = false; }
   }
   onKill() {
@@ -388,15 +413,77 @@ class PlayerRed {
   }
 }
 
+// ===================== HELPER (GREY, 1/2 damage of red) =====================
+class Helper {
+  constructor(x, y, equipped) {
+    this.x = x; this.y = y;
+    this.radius = 12;
+    this.baseSpeed = 5.0 * SPEED_MULT;
+    this.angle = 0;
+    this.equipped = equipped;
+    this.lastShot = 0;
+    this.lastRocket = 0;
+    this.lastDash = 0;
+    this.lastShield = -30;
+    this.shieldHp = 0;
+    this.dashEnd = 0;
+  }
+  update(target, enemies, redBullets, redRockets) {
+    if (!target.isAlive) return;
+    const t = now();
+    const dx = target.x - this.x, dy = target.y - this.y;
+    const d = Math.hypot(dx, dy) || 1;
+    if (d > 120) {
+      this.x += (dx / d) * this.baseSpeed;
+      this.y += (dy / d) * this.baseSpeed;
+    }
+    let best = null, bestD = Infinity;
+    for (const e of enemies) {
+      if (!e.isAlive) continue;
+      const ed = Math.hypot(e.x - this.x, e.y - this.y);
+      if (ed < bestD) { bestD = ed; best = e; }
+    }
+    if (best) this.angle = Math.atan2(best.y - this.y, best.x - this.x);
+
+    // Fire bullets — 1/2 damage of red's regular bullet
+    if (t - this.lastShot > 0.15) {
+      this.lastShot = t;
+      const b = new Bullet(this.x, this.y, this.angle, 11, 4, "#bbbbbb", false);
+      b.fromHelper = true;
+      b.damageMult = 0.5;   // grey = 1/2 red damage
+      redBullets.push(b);
+    }
+    // Rockets — 1/2 damage
+    if (this.equipped.includes("rocket") && t - this.lastRocket > 4) {
+      this.lastRocket = t;
+      if (best) {
+        const r = new Rocket(this.x, this.y, best, 5.0, "#ffbb77", true);
+        r.damage = 0.5;     // grey rocket = 1/2 red rocket damage
+        redRockets.push(r);
+      }
+    }
+    // Shield
+    if (this.equipped.includes("shield") && this.shieldHp <= 0 &&
+        t - this.lastShield > 30) {
+      this.shieldHp = 10;
+      this.lastShield = t;
+    }
+
+    this.x = Math.max(this.radius, Math.min(W - this.radius, this.x));
+    this.y = Math.max(this.radius, Math.min(H - this.radius, this.y));
+  }
+  draw() {
+    let color = "#888888";
+    if (this.shieldHp > 0) {
+      ctx.strokeStyle = "#06d6a0"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.radius + 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    drawTri(this.x, this.y, this.radius, this.angle, color);
+  }
+}
+
 // ===================== ENEMIES =====================
-/*
-  Yellow (reworked):
-  - Circles player from 3 directions
-  - Single bullets only (no multi-shot, since undodgeable spread)
-  - If >5 yellows on stage: only 5 can shoot, but ALL can crash-dash when Trans-Am
-  - 30s Trans-Am window, white shadow trail, 1.5x speed
-  - Crash dash locks target position (dodgeable, telegraphed)
-*/
 class YellowTriangle {
   constructor(x, y, hp = 4) {
     this.x = x; this.y = y;
@@ -424,7 +511,7 @@ class YellowTriangle {
     this.orbitAngle = Math.random() * Math.PI * 2;
     this.orbitDir = Math.random() < 0.5 ? 1 : -1;
     this.orbitSpeed = 0.02 + Math.random() * 0.02;
-    this.canShoot = true;  // assigned by game each tick
+    this.canShoot = true;
   }
   takeDamage(n = 1) {
     this.hp -= n;
@@ -448,7 +535,7 @@ class YellowTriangle {
     const dx = target.x - this.x, dy = target.y - this.y;
     const d = Math.hypot(dx, dy) || 1;
     this.dashDir = [dx / d, dy / d];
-    this.dashMaxDist = d + 120;
+    this.dashMaxDist = Math.max(W, H) * 1.5;
     this.dashTravelled = 0;
     this.dashHitDone = false;
   }
@@ -463,10 +550,16 @@ class YellowTriangle {
       this.dashTravelled += sp;
       if (!this.dashHitDone && target.isAlive &&
           Math.hypot(target.x - this.x, target.y - this.y) < this.radius + target.radius) {
-        target.takeDamage(3);
+        target.takeDamage(5); // yellow crash = 5 damage
         this.dashHitDone = true;
       }
-      if (this.dashTravelled >= this.dashMaxDist) this.isDashing = false;
+      if (this.x < this.radius || this.x > W - this.radius ||
+          this.y < this.radius || this.y > H - this.radius ||
+          this.dashTravelled >= this.dashMaxDist) {
+        this.isDashing = false;
+        this.x = Math.max(this.radius, Math.min(W - this.radius, this.x));
+        this.y = Math.max(this.radius, Math.min(H - this.radius, this.y));
+      }
     }
   }
   update(target, enemyBullets) {
@@ -488,7 +581,6 @@ class YellowTriangle {
     if (this.isCharging || this.isDashing) {
       this.updateDash(target);
     } else {
-      // Orbit the player
       this.orbitAngle += this.orbitSpeed * this.orbitDir;
       const targetX = target.x + Math.cos(this.orbitAngle) * this.preferredDistance;
       const targetY = target.y + Math.sin(this.orbitAngle) * this.preferredDistance;
@@ -498,8 +590,6 @@ class YellowTriangle {
         this.x += (toTX / toTD) * speed;
         this.y += (toTY / toTD) * speed;
       }
-
-      // Single bullet only (no multi)
       if (this.canShoot && now() - this.lastAttackTime >= this.attackInterval) {
         this.lastAttackTime = now();
         const choice = this.transAmActive
@@ -508,7 +598,9 @@ class YellowTriangle {
         if (choice === "single") {
           enemyBullets.push(new Bullet(this.x, this.y, this.angle, 11, 6, "#ffe66d"));
         } else if (choice === "single_strong") {
-          enemyBullets.push(new Bullet(this.x, this.y, this.angle, 16, 9, "#ffffff", true));
+          const b = new Bullet(this.x, this.y, this.angle, 16, 9, "#ffffff", true);
+          b.damageMult = 2; // yellow strong = 2
+          enemyBullets.push(b);
         } else {
           this.triggerDash(target);
         }
@@ -536,23 +628,19 @@ class YellowTriangle {
       ctx.strokeStyle = "#ff0000"; ctx.lineWidth = 2; ctx.setLineDash([6, 6]);
       ctx.beginPath();
       ctx.moveTo(this.x, this.y);
-      ctx.lineTo(this.x + this.dashDir[0] * this.dashMaxDist,
-                 this.y + this.dashDir[1] * this.dashMaxDist);
+      ctx.lineTo(this.x + this.dashDir[0] * 400,
+                 this.y + this.dashDir[1] * 400);
       ctx.stroke(); ctx.setLineDash([]);
     }
   }
 }
 
-/*
-  Blue: unchanged — fires 3 rockets (now 2s lifetime, homing)
-*/
 class BlueTriangle {
   constructor(x, y) {
     this.x = x; this.y = y;
     this.radius = 17; this.speed = 4.8 * SPEED_MULT; this.angle = 0;
     this.maxHp = 2; this.hp = 2; this.isAlive = true;
     this.lastRocketTime = now(); this.rocketInterval = 2.0;
-    this.type = "blue";
   }
   takeDamage(n = 1) {
     this.hp -= n;
@@ -584,9 +672,6 @@ class BlueTriangle {
   }
 }
 
-/*
-  Purple: reduced damage (1/10 = 0.1 per hit)
-*/
 class PurpleTriangle {
   constructor(x, y) {
     this.x = x; this.y = y;
@@ -594,7 +679,6 @@ class PurpleTriangle {
     this.maxHp = 6; this.hp = 6; this.isAlive = true;
     this.preferredDistance = 300;
     this.lastShotTime = now(); this.shotInterval = 0.9;
-    this.type = "purple";
   }
   takeDamage(n = 1) {
     this.hp -= n;
@@ -619,7 +703,7 @@ class PurpleTriangle {
     if (now() - this.lastShotTime >= this.shotInterval) {
       this.lastShotTime = now();
       const b = new Bullet(this.x, this.y, this.angle, 9, 6, "#c77dff");
-      b.damageMult = 0.1; // only 1/10 damage
+      b.damageMult = 0.5;
       enemyBullets.push(b);
     }
     this.x = Math.max(this.radius, Math.min(W - this.radius, this.x));
@@ -631,22 +715,14 @@ class PurpleTriangle {
   }
 }
 
-/*
-  Green (new): rocket-only enemy
-  - Fires 7 rockets at once, then waits (stays far) while rockets fly
-  - When all rockets used, waits 2s (turns white) then crash-dashes to
-    red's NEW position at 5x speed in a straight line (dodgeable)
-*/
 class GreenTriangle {
   constructor(x, y) {
     this.x = x; this.y = y;
     this.radius = 18; this.speed = 4.5 * SPEED_MULT; this.angle = 0;
     this.maxHp = 4; this.hp = 4; this.isAlive = true;
-    this.type = "green";
     this.preferredDistance = 380;
-    this.state = "firing";  // firing | waiting | charging | dashing
+    this.state = "firing";
     this.fireCooldown = now() + 1.0;
-    this.rocketsFired = 0;
     this.waitStart = 0;
     this.chargeStart = 0;
     this.dashDir = [0, 0];
@@ -665,50 +741,49 @@ class GreenTriangle {
     const dist = Math.hypot(dx, dy) || 1;
     this.angle = Math.atan2(dy, dx);
 
-    if (this.state === "firing") {
-      // Stay far
-      if (dist < this.preferredDistance - 40) {
+    // Normal movement in all states except dashing
+    if (this.state !== "dashing") {
+      if (dist > this.preferredDistance - 40) {
+        this.x += (dx / dist) * this.speed;
+        this.y += (dy / dist) * this.speed;
+      } else if (dist < this.preferredDistance - 100) {
         this.x -= (dx / dist) * this.speed;
         this.y -= (dy / dist) * this.speed;
       }
+    }
+
+    if (this.state === "firing") {
       if (t >= this.fireCooldown) {
-        // Fire all 7 at once
         for (let i = 0; i < 7; i++) {
           if (enemyRockets.length < 30) {
-            const spread = (i - 3) * 0.15;
             enemyRockets.push(new Rocket(this.x, this.y, target, 6.5, "#ff9f43"));
           }
         }
-        this.rocketsFired = 7;
         this.state = "waiting";
         this.waitStart = t;
       }
     } else if (this.state === "waiting") {
-      // Wait for rockets to clear (or 2 seconds)
       const rocketCount = enemyRockets.filter(r => r.target === target).length;
       if (rocketCount === 0 || t - this.waitStart >= 4) {
         this.state = "charging";
         this.chargeStart = t;
-        // Lock target position NOW (dodgeable)
-        const d = Math.hypot(dx, dy) || 1;
-        this.dashDir = [dx / d, dy / d];
-        this.dashMaxDist = d + 150;
+        this.dashDir = [dx / dist, dy / dist];
+        this.dashMaxDist = dist + 150;
         this.dashTravelled = 0;
         this.dashHitDone = false;
       }
     } else if (this.state === "charging") {
-      // 2s white windup
       if (t - this.chargeStart >= 2.0) {
         this.state = "dashing";
       }
     } else if (this.state === "dashing") {
-      const sp = this.speed * 5;  // 5x speed
+      const sp = this.speed * 5;
       this.x += this.dashDir[0] * sp;
       this.y += this.dashDir[1] * sp;
       this.dashTravelled += sp;
       if (!this.dashHitDone && target.isAlive &&
           Math.hypot(target.x - this.x, target.y - this.y) < this.radius + target.radius + this.radius * 0.5) {
-        target.takeDamage(3);
+        target.takeDamage(3); // green crash = 3
         this.dashHitDone = true;
       }
       if (this.dashTravelled >= this.dashMaxDist ||
@@ -780,6 +855,7 @@ const SKILLS = {
   strike:   { name: "STRIKE",   cost: 500 },
   lockon:   { name: "LOCKON",   cost: 100 },
   fake:     { name: "FAKE",     cost: 400 },
+  help:     { name: "HELP",     cost: 600 },
 };
 
 const MAX_EQUIPPED = 3;
@@ -794,8 +870,8 @@ class Game {
     this.buttons = [];
 
     this.marks = 0;
-    this.ownedSkills = { shield: false, strike: false, lockon: false, fake: false };
-    this.equippedSkills = []; // max 3
+    this.ownedSkills = { shield: false, strike: false, lockon: false, fake: false, help: false };
+    this.equippedSkills = [];
 
     this.player = null;
     this.enemies = [];
@@ -821,8 +897,7 @@ class Game {
     this.skillR = 32;
     this.rocketBtn = { cx: 0, cy: 0 };
     this.powerBtn  = { cx: 0, cy: 0 };
-    this.dashBtn   = { cx: 0, cy: 0 };
-    this.skillBtns = {}; // dynamic skill buttons
+    this.skillBtns = {};
 
     this.powerShotPending = false;
     this.touches = new Map();
@@ -894,9 +969,6 @@ class Game {
     return pts;
   }
 
-  /*
-    Constraint: only 5 non-yellow enemies max on stage; no two at same pos.
-  */
   chooseEnemyTypeToSpawn() {
     const d = this.difficulty;
     const alive = this.enemies.filter(e => e.isAlive);
@@ -914,7 +986,6 @@ class Game {
       counts.yellow < d.maxYellowsOnScreen;
 
     const pool = [];
-    // Only 5 non-yellow on stage
     if (nonYellowTotal < 5) {
       if (counts.blue   < d.maxEnemies.blue)   pool.push("blue");
       if (counts.purple < d.maxEnemies.purple) pool.push("purple");
@@ -928,7 +999,6 @@ class Game {
   spawnRandomEnemy() {
     const type = this.chooseEnemyTypeToSpawn();
     if (!type) return null;
-    // Find position not overlapping any existing enemy
     let x, y, attempts = 0;
     do {
       const side = Math.floor(Math.random() * 4);
@@ -962,10 +1032,8 @@ class Game {
       return;
     }
 
-    // Lockon selection mode (touch): tap to place a lockon circle
     if (this.player && this.player.lockonSelecting) {
       this.player.lockonPath.push({ x, y, r: 80 });
-      // Commit after 1 circle (or let user place more with quick timing)
       setTimeout(() => {
         if (this.player && this.player.lockonSelecting) this.player.commitLockon();
       }, 400);
@@ -977,7 +1045,6 @@ class Game {
       return;
     }
 
-    // Skill buttons
     for (const [skillKey, btn] of Object.entries(this.skillBtns)) {
       if (Math.hypot(x - btn.cx, y - btn.cy) < this.skillR) {
         this.touches.set(id, skillKey);
@@ -985,6 +1052,7 @@ class Game {
         else if (skillKey === "strike") this.player.tryArmStrike();
         else if (skillKey === "lockon") this.player.activateLockon();
         else if (skillKey === "fake") this.player.activateFake();
+        else if (skillKey === "help") this.player.activateHelp();
         return;
       }
     }
@@ -1091,13 +1159,13 @@ class Game {
       this.player.tryArmStrike();
       if (this.player.strikePending) this.player.beginStrike(this.player.angle);
     } else if (k === "r") {
-      // Lockon: arm then place at mouse
       this.player.activateLockon();
       if (this.player.lockonSelecting) {
         this.player.lockonPath.push({ x: this.mousePos[0], y: this.mousePos[1], r: 80 });
         this.player.commitLockon();
       }
     } else if (k === "g") this.player.activateFake();
+    else if (k === "h") this.player.activateHelp();
     else if (k === " ") this.player.triggerDash();
   }
 
@@ -1114,7 +1182,6 @@ class Game {
       if (firing && this.player.isAlive && t - this.lastAutoShootTime >= this.autoShootInterval) {
         this.lastAutoShootTime = t;
         const bullet = new Bullet(this.player.x, this.player.y, aimAngle, 12, 5, "#00fff5");
-        // Lockon: home nearest target + 1.5x damage
         const locked = this.player.getLockonTargets();
         if (locked.length) {
           let best = null, bestD = Infinity;
@@ -1145,7 +1212,19 @@ class Game {
     this.player.updateStrike();
     this.player.updateFake();
 
-    // Strike destroys
+    // Update helpers
+    if (this.player.helpActive) {
+      if (t - this.player.helpStart >= this.player.helpDuration) {
+        this.player.helpActive = false;
+        this.player.helpLastUsed = t;
+        this.player.helpers = [];
+      } else {
+        for (const h of this.player.helpers) {
+          h.update(this.player, this.enemies, this.redBullets, this.redRockets);
+        }
+      }
+    }
+
     if (this.player.isStriking) {
       const strikeRadius = this.player.radius * 1.5;
       for (const e of this.enemies) {
@@ -1155,12 +1234,10 @@ class Game {
       }
     }
 
-    // Assign yellow shooting slots (only 5 can shoot if >5 on stage)
     const yellows = this.enemies.filter(e => e instanceof YellowTriangle && e.isAlive);
     const yellowsToShoot = yellows.slice(0, 5);
     for (const y of yellows) y.canShoot = yellowsToShoot.includes(y);
 
-    // Enemies
     const newEnemies = [];
     for (const e of this.enemies) {
       if (e instanceof YellowTriangle)    e.update(this.player, this.enemyBullets);
@@ -1177,18 +1254,18 @@ class Game {
     }
     this.enemies = newEnemies;
 
-    for (const b of this.redBullets)       b.update(this.enemies);
+    for (const b of this.redBullets)       b.update();
     for (const b of this.redStrongBullets) b.update();
     for (const r of this.redRockets)       r.update();
     for (const b of this.enemyBullets)     b.update();
     for (const r of this.enemyRockets)     r.update();
 
-    // Player bullets vs enemies — lockon targets get 1.5x damage
+    // Red bullets vs enemies
     for (const b of this.redBullets) {
       if (!b.active) continue;
       for (const e of this.enemies) {
         if (e.isAlive && Math.hypot(b.x - e.x, b.y - e.y) < e.radius + b.radius) {
-          const dmg = b.lockOnTarget === e ? b.damageMult : 1;
+          const dmg = (b.lockOnTarget === e ? b.damageMult : 1) * (b.fromHelper ? 0.5 : 1);
           e.takeDamage(dmg);
           if (!b.piercing) b.active = false;
           break;
@@ -1199,7 +1276,8 @@ class Game {
       if (!sb.active) continue;
       for (const e of this.enemies) {
         if (e.isAlive && Math.hypot(sb.x - e.x, sb.y - e.y) < e.radius + sb.radius) {
-          e.takeDamage(sb.lockOnTarget === e ? 99 * sb.damageMult : 99);
+          const dmg = sb.lockOnTarget === e ? 99 * sb.damageMult : 99;
+          e.takeDamage(sb.fromHelper ? dmg * 0.5 : dmg);
         }
       }
     }
@@ -1207,12 +1285,12 @@ class Game {
       if (!r.active) continue;
       for (const e of this.enemies) {
         if (e.isAlive && Math.hypot(r.x - e.x, r.y - e.y) < e.radius + r.radius) {
-          r.active = false; e.takeDamage(2); break;
+          r.active = false; e.takeDamage(r.damage * 2); break;
         }
       }
     }
 
-    // Enemy attacks vs player (purple does only 0.1 damage)
+    // Enemy attacks vs player
     if (this.player.isAlive) {
       for (const b of this.enemyBullets) {
         if (b.active && Math.hypot(b.x - this.player.x, b.y - this.player.y) < this.player.radius + b.radius) {
@@ -1249,7 +1327,6 @@ class Game {
     if (this.state === "difficulty") return this.drawDifficultySelect();
     if (this.state === "shop")       return this.drawShop();
 
-    // Lockon selection overlay
     if (this.player.lockonSelecting) {
       ctx.fillStyle = "rgba(0,0,0,0.4)"; ctx.fillRect(0, 0, W, H);
       if (this.touchMode) {
@@ -1269,7 +1346,6 @@ class Game {
       }
     }
 
-    // Active lockon markers
     if (this.player.lockonActive) {
       for (const c of this.player.lockonPath) {
         ctx.strokeStyle = "rgba(0,255,245,0.5)"; ctx.lineWidth = 2;
@@ -1284,7 +1360,6 @@ class Game {
       }
     }
 
-    // Strike trails
     if (this.player.strikeTrail) {
       for (const tr of this.player.strikeTrail) {
         ctx.globalAlpha = Math.max(0, tr.life / 0.25) * 0.7;
@@ -1293,7 +1368,9 @@ class Game {
       ctx.globalAlpha = 1;
     }
 
-    // Player
+    // Helpers
+    for (const h of this.player.helpers) h.draw();
+
     if (this.player.isAlive) {
       let color = "#ff2e63";
       if (this.player.isStriking) color = "#ffffff";
@@ -1301,7 +1378,6 @@ class Game {
       else if (this.player.shieldHp > 0) color = "#06d6a0";
 
       if (this.player.fakeActive) {
-        // Two orbiting circle planes
         const r = this.player.radius + 20;
         for (let i = 0; i < 2; i++) {
           const a = this.player.fakeOrbsAngle + i * Math.PI;
@@ -1321,7 +1397,6 @@ class Game {
       drawTri(this.player.x, this.player.y, this.player.radius, this.player.angle, color);
       drawHpBar(this.player.x, this.player.y, this.player.hp, this.player.maxHp, "#06d6a0");
 
-      // Strike aim line
       if (this.player.strikePending) {
         const ex = this.player.x + Math.cos(this.rightAimAngle) * 300;
         const ey = this.player.y + Math.sin(this.rightAimAngle) * 300;
@@ -1374,6 +1449,10 @@ class Game {
         cdFrac = this.player.fakeActive ? 0 :
           Math.max(0, (this.player.fakeCd - (t - this.player.fakeLastUsed)) / this.player.fakeCd);
         glow = this.player.fakeActive;
+      } else if (key === "help") {
+        cdFrac = this.player.helpActive ? 0 :
+          Math.max(0, (this.player.helpCd - (t - this.player.helpLastUsed)) / this.player.helpCd);
+        glow = this.player.helpActive;
       }
       this.drawSkillButton(btn, key, this.skillLabel(key), cdFrac, this.touchesValueHas(key), glow);
     }
@@ -1395,7 +1474,7 @@ class Game {
   }
 
   skillLabel(key) {
-    return { shield: "Q", strike: "F", lockon: "R", fake: "G" }[key] || key[0].toUpperCase();
+    return { shield: "Q", strike: "F", lockon: "R", fake: "G", help: "H" }[key] || key[0].toUpperCase();
   }
 
   touchesValueHas(val) {
@@ -1468,14 +1547,16 @@ class Game {
     } else if (symbol === "lockon") {
       ctx.beginPath(); ctx.arc(btn.cx, btn.cy, s * 0.7, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.arc(btn.cx, btn.cy, s * 0.3, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.moveTo(btn.cx - s, btn.cy); ctx.lineTo(btn.cx - s * 0.5, btn.cy);
-      ctx.moveTo(btn.cx + s, btn.cy); ctx.lineTo(btn.cx + s * 0.5, btn.cy);
-      ctx.moveTo(btn.cx, btn.cy - s); ctx.lineTo(btn.cx, btn.cy - s * 0.5);
-      ctx.moveTo(btn.cx, btn.cy + s); ctx.lineTo(btn.cx, btn.cy + s * 0.5);
-      ctx.stroke();
     } else if (symbol === "fake") {
       ctx.beginPath(); ctx.arc(btn.cx, btn.cy, s * 0.8, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.arc(btn.cx, btn.cy, s * 0.5, 0, Math.PI * 2); ctx.stroke();
+    } else if (symbol === "help") {
+      for (let i = 0; i < 3; i++) {
+        const a = i * Math.PI * 2 / 3;
+        const px = btn.cx + Math.cos(a) * s * 0.6;
+        const py = btn.cy + Math.sin(a) * s * 0.6;
+        ctx.beginPath(); ctx.arc(px, py, s * 0.25, 0, Math.PI * 2); ctx.fill();
+      }
     }
     ctx.restore();
     ctx.fillStyle = "#aaa"; ctx.font = "10px Helvetica";
@@ -1492,7 +1573,7 @@ class Game {
     if (this.touchMode) {
       lines.push("TOUCH — L: move | R: aim+fire | Tap icons for skills");
     } else {
-      lines.push("[LMB]Fire [E]Rocket [C]Beam [Q]Shield [F]Strike [R]Lockon [G]Fake");
+      lines.push("[LMB]Fire [E]Rocket [C]Beam [Q]Shield [F]Strike [R]Lockon [G]Fake [H]Help");
       lines.push(`[Space]Dash: ${dsLeft <= 0 ? "READY" : dsLeft.toFixed(1) + "s"}`);
     }
     ctx.fillStyle = "#e0e0e0"; ctx.font = "13px Helvetica";
@@ -1500,7 +1581,6 @@ class Game {
     lines.forEach((line, i) => ctx.fillText(line, 12, 12 + i * 20));
   }
 
-  // --- Select screens ---
   drawControlSelect() {
     this.buttons = [];
     ctx.textAlign = "center";
@@ -1513,7 +1593,7 @@ class Game {
     const kbX = W / 2 - bw - 30, kbY = 230;
     this.drawChoiceBox(kbX, kbY, bw, bh, "#ff2e63", "KEYBOARD + MOUSE",
       ["WASD / Space — move & dash", "Left Click fire · E rocket",
-       "C beam · Q shield · F strike · R lockon · G fake"]);
+       "C beam · Q shield · F strike · R lockon · G fake · H help"]);
     this.buttons.push({ x: kbX, y: kbY, w: bw, h: bh,
       action: () => { this.touchMode = false; this.state = "difficulty"; } });
 
@@ -1592,13 +1672,13 @@ class Game {
     ctx.fillStyle = "#aaa"; ctx.font = "14px Helvetica";
     ctx.fillText(`Marks: ${this.marks}  |  Equipped: ${this.equippedSkills.length}/${MAX_EQUIPPED}`, W / 2, 76);
 
-    const keys = ["shield", "strike", "lockon", "fake"];
-    const gap = 16;
-    const marginX = Math.max(15, W * 0.03);
-    const usable = W - marginX * 2 - gap * 3;
-    const bw = Math.min(200, usable / 4);
+    const keys = ["shield", "strike", "lockon", "fake", "help"];
+    const gap = 14;
+    const marginX = Math.max(12, W * 0.02);
+    const usable = W - marginX * 2 - gap * 4;
+    const bw = Math.min(170, usable / 5);
     const bh = Math.min(260, H * 0.5);
-    const totalW = bw * 4 + gap * 3;
+    const totalW = bw * 5 + gap * 4;
     const startX = (W - totalW) / 2;
     const startY = Math.min(H * 0.22, 100);
 
@@ -1614,24 +1694,23 @@ class Game {
       ctx.strokeStyle = equipped ? "#06d6a0" : (owned ? "#00fff5" : "#c77dff");
       ctx.lineWidth = 3; ctx.strokeRect(x, startY, bw, bh);
 
-      // Draw icon (visual only, no text description)
-      this.drawSkillIcon(x + bw / 2, startY + 80, 45, key);
+      this.drawSkillIcon(x + bw / 2, startY + 70, 35, key);
 
-      // Name
-      ctx.fillStyle = "#c77dff"; ctx.font = "bold 18px Helvetica";
+      ctx.fillStyle = "#c77dff"; ctx.font = "bold 16px Helvetica";
       ctx.fillText(s.name, x + bw / 2, startY + bh - 90);
 
       if (owned) {
         if (equipped) {
-          ctx.fillStyle = "#06d6a0"; ctx.font = "bold 14px Helvetica";
+          ctx.fillStyle = "#06d6a0"; ctx.font = "bold 12px Helvetica";
           ctx.fillText("✓ EQUIPPED", x + bw / 2, startY + bh - 60);
-          // Unequip button
+          ctx.fillStyle = "#888"; ctx.font = "10px Helvetica";
+          ctx.fillText("tap to unequip", x + bw / 2, startY + bh - 45);
           this.buttons.push({ x, y: startY, w: bw, h: bh,
             action: () => {
               this.equippedSkills = this.equippedSkills.filter(k => k !== key);
             }});
         } else {
-          ctx.fillStyle = "#00fff5"; ctx.font = "bold 14px Helvetica";
+          ctx.fillStyle = "#00fff5"; ctx.font = "bold 12px Helvetica";
           ctx.fillText("TAP TO EQUIP", x + bw / 2, startY + bh - 60);
           this.buttons.push({ x, y: startY, w: bw, h: bh,
             action: () => {
@@ -1641,7 +1720,7 @@ class Game {
         }
       } else {
         ctx.fillStyle = canAfford ? "#ffd166" : "#666";
-        ctx.font = "bold 14px Helvetica";
+        ctx.font = "bold 13px Helvetica";
         ctx.fillText(`Buy — ${s.cost}`, x + bw / 2, startY + bh - 60);
         if (canAfford) {
           this.buttons.push({ x, y: startY, w: bw, h: bh,
@@ -1655,13 +1734,11 @@ class Game {
       }
     });
 
-    // Overflow warning
     if (this.equippedSkills.length >= MAX_EQUIPPED) {
       ctx.fillStyle = "#ff9f1c"; ctx.font = "12px Helvetica";
       ctx.fillText("Max equipped — unequip a skill to equip another", W / 2, startY + bh + 15);
     }
 
-    // Back button
     const backW = 180, backH = 50;
     const backX = (W - backW) / 2;
     const backY = startY + bh + 40;
@@ -1673,7 +1750,6 @@ class Game {
       action: () => { this.state = "difficulty"; } });
   }
 
-  // Draw a skill icon at (cx, cy) with radius r — used in shop
   drawSkillIcon(cx, cy, r, key) {
     ctx.save();
     ctx.strokeStyle = "#dddddd"; ctx.fillStyle = "#dddddd"; ctx.lineWidth = 3;
@@ -1694,9 +1770,6 @@ class Game {
       ctx.lineTo(cx, cy + s);
       ctx.lineTo(cx - s * 0.4, cy);
       ctx.closePath(); ctx.fill();
-      ctx.beginPath(); ctx.moveTo(cx - s, cy); ctx.lineTo(cx - s * 1.5, cy - s * 0.3);
-      ctx.moveTo(cx - s, cy); ctx.lineTo(cx - s * 1.5, cy + s * 0.3);
-      ctx.stroke();
     } else if (key === "lockon") {
       ctx.beginPath(); ctx.arc(cx, cy, s * 0.7, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.arc(cx, cy, s * 0.3, 0, Math.PI * 2); ctx.fill();
@@ -1709,7 +1782,13 @@ class Game {
     } else if (key === "fake") {
       ctx.beginPath(); ctx.arc(cx, cy, s, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.arc(cx, cy, s * 0.55, 0, Math.PI * 2); ctx.stroke();
-      ctx.beginPath(); ctx.arc(cx, cy, s * 0.2, 0, Math.PI * 2); ctx.fill();
+    } else if (key === "help") {
+      for (let i = 0; i < 3; i++) {
+        const a = i * Math.PI * 2 / 3 - Math.PI / 2;
+        const px = cx + Math.cos(a) * s * 0.6;
+        const py = cy + Math.sin(a) * s * 0.6;
+        ctx.beginPath(); ctx.arc(px, py, s * 0.25, 0, Math.PI * 2); ctx.fill();
+      }
     }
     ctx.restore();
   }
